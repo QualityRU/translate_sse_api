@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Live Bidirectional Translation</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .panel { display: flex; gap: 40px; margin-bottom: 30px; }
+    .control { flex: 1; border: 1px solid #ccc; border-radius: 8px; padding: 15px; background: #f8f8f8; }
+    button, select { margin-top: 10px; margin-right: 10px; padding: 10px; }
+    .translation-box { background: #fff; border-radius: 6px; border: 1px solid #ccc; height: 150px; overflow-y: auto; padding: 10px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+
+<h2>🎙️ Live Bidirectional Speech Translation</h2>
+
+<div class="panel">
+  <!-- Side A -->
+  <div class="control">
+    <h3>🗣️ Side A</h3>
+    <label>Language:</label>
+    <select id="langA">
+      <option value="ru">Russian</option>
+      <option value="en">English</option>
+    </select><br>
+    <button id="startA">Start A</button>
+    <button id="stopA" disabled>Stop A</button>
+    <div class="translation-box" id="origA"><strong>📝 A Said:</strong><br></div>
+    <div class="translation-box" id="transA"><strong>🌍 A → B:</strong><br></div>
+  </div>
+
+  <!-- Side B -->
+  <div class="control">
+    <h3>🗣️ Side B</h3>
+    <label>Language:</label>
+    <select id="langB">
+      <option value="ru">Russian</option>
+      <option value="en">English</option>
+    </select><br>
+    <button id="startB">Start B</button>
+    <button id="stopB" disabled>Stop B</button>
+    <div class="translation-box" id="origB"><strong>📝 B Said:</strong><br></div>
+    <div class="translation-box" id="transB"><strong>🌍 B → A:</strong><br></div>
+  </div>
+</div>
+
+<script>
+function createSpeechHandler(prefix, fromSelectId, toSelectId, origBoxId, transBoxId, startBtnId, stopBtnId) {
+  const state = {
+    recorder: null,
+    stream: null,
+    intervalId: null,
+    sessionId: crypto.randomUUID(),
+    eventSource: null,
+    isRecording: false,
+  };
+
+  const getLangs = () => ({
+    from: document.getElementById(fromSelectId).value,
+    to: document.getElementById(toSelectId).value,
+  });
+
+  const log = (msg) => console.log(`[${prefix}] ${msg}`);
+
+  const startSSE = () => {
+    const { from, to } = getLangs();
+    const url = `http://localhost:8000/stream-events/${state.sessionId}?from_lang=${from}&to_lang=${to}`;
+    state.eventSource = new EventSource(url);
+
+    state.eventSource.addEventListener("transcribed", (e) => {
+      const data = JSON.parse(e.data);
+      const p = document.createElement("p");
+      p.textContent = data.text;
+      document.getElementById(origBoxId).appendChild(p);
+    });
+
+    state.eventSource.addEventListener("translated", (e) => {
+      const data = JSON.parse(e.data);
+      const p = document.createElement("p");
+      p.textContent = data.translated_text;
+      document.getElementById(transBoxId).appendChild(p);
+    });
+
+    state.eventSource.onerror = () => log("❌ SSE error");
+    log("🔌 SSE connected");
+  };
+
+  const stopSSE = () => {
+    if (state.eventSource) {
+      state.eventSource.close();
+      log("🔌 SSE closed");
+    }
+  };
+
+  const sendAudio = (blob) => {
+    const { from, to } = getLangs();
+    fetch(`http://localhost:8000/upload-audio/?session_id=${state.sessionId}&source=${from}&target=${to}`, {
+      method: "POST",
+      headers: { "Content-Type": "audio/webm" },
+      body: blob
+    }).catch(err => log("❌ Audio upload error: " + err.message));
+  };
+
+  const start = async () => {
+    document.getElementById(origBoxId).innerHTML = "<strong>📝</strong><br>";
+    document.getElementById(transBoxId).innerHTML = "<strong>🌍</strong><br>";
+    startSSE();
+
+    try {
+      state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      log("❌ Microphone error: " + err.message);
+      return;
+    }
+
+    state.recorder = new MediaRecorder(state.stream, { mimeType: "audio/webm;codecs=opus" });
+
+    state.recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) sendAudio(e.data);
+    };
+
+    state.recorder.onstop = () => {
+      if (state.isRecording) state.recorder.start(5000);
+    };
+
+    state.isRecording = true;
+    state.recorder.start(5000);
+    state.intervalId = setInterval(() => {
+      if (state.isRecording && state.recorder.state === "recording") {
+        state.recorder.stop();
+      }
+    }, 5000);
+
+    document.getElementById(startBtnId).disabled = true;
+    document.getElementById(stopBtnId).disabled = false;
+    log("🎬 Recording started");
+  };
+
+  const stop = () => {
+    state.isRecording = false;
+    clearInterval(state.intervalId);
+    if (state.recorder && state.recorder.state === "recording") state.recorder.stop();
+    stopSSE();
+    document.getElementById(startBtnId).disabled = false;
+    document.getElementById(stopBtnId).disabled = true;
+    log("🛑 Recording stopped");
+  };
+
+  return { start, stop };
+}
+
+// Init both handlers
+const handlerA = createSpeechHandler("A", "langA", "langB", "origA", "transA", "startA", "stopA");
+const handlerB = createSpeechHandler("B", "langB", "langA", "origB", "transB", "startB", "stopB");
+
+document.getElementById("startA").onclick = handlerA.start;
+document.getElementById("stopA").onclick = handlerA.stop;
+document.getElementById("startB").onclick = handlerB.start;
+document.getElementById("stopB").onclick = handlerB.stop;
+</script>
+
+</body>
+</html>
